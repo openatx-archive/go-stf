@@ -36,7 +36,12 @@ func TestRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("start time used: %v", time.Since(start))
-	t.Logf("read value: %d", <-subC)
+	select {
+	case v := <-subC:
+		t.Logf("read value: %d", v)
+	case <-time.After(10 * time.Second):
+		t.Fatal("get rotation timeout")
+	}
 	r.Unsubscribe(subC)
 	time.Sleep(5 * time.Second)
 	err = r.Stop()

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -58,15 +59,21 @@ func (s *STFRotation) Start() error {
 			err := s.consoleStartProcess(pmPath)
 			if err == nil {
 				s.leftRetry = 3
+			} else {
+				log.Printf("rotation run failed: %v, left retry %d", err, s.leftRetry)
 			}
 
 			s.mu.Lock()
 			s.wg.Done()
+			s.leftRetry -= 1
 			if s.stopped || s.leftRetry <= 0 {
+				for subC := range s.subscribers {
+					s.Unsubscribe(subC)
+					close(subC)
+				}
 				s.mu.Unlock()
 				break
 			}
-			s.leftRetry -= 1
 			s.mu.Unlock()
 		}
 	}()
@@ -119,7 +126,7 @@ func (s *STFRotation) preparePackage() (pmPath string, err error) {
 }
 
 func (s *STFRotation) consoleStartProcess(pmPath string) error {
-	fio, err := s.d.Command("CLASSPATH="+pmPath, "exec", "app_process", "/system/bin", "jp.co.cyberagent.stf.rotationwatcher.RotationWatcher")
+	fio, err := s.d.Command("CLASSPATH="+pmPath, "exec", "app_process", "/system/bin", defaultRotationPkgName+".RotationWatcher")
 	if err != nil {
 		return err
 	}
@@ -146,11 +153,12 @@ func (s *STFRotation) pushApk() error {
 	if err == nil {
 		return nil
 	}
-	wc, err := s.d.OpenWrite("/data/local/tmp/RotationWatcher.apk", 0644, time.Now())
+	phoneApkPath := "/data/local/tmp/RotationWatcher.apk"
+	wc, err := s.d.OpenWrite(phoneApkPath, 0644, time.Now())
 	if err != nil {
 		return err
 	}
-	resp, err := http.Get("https://gohttp.nie.netease.com/tmp/RotationWatcher.apk")
+	resp, err := http.Get("https://github.com/openatx/RotationWatcher.apk/releases/download/1.0/RotationWatcher.apk")
 	if err != nil {
 		return err
 	}
@@ -158,18 +166,20 @@ func (s *STFRotation) pushApk() error {
 		return errors.New("http download rotation watcher status " + resp.Status)
 	}
 	defer resp.Body.Close()
+	log.Println("Downloading RotationWatcher.apk ...")
 	if _, err = io.Copy(wc, resp.Body); err != nil {
 		return err
 	}
+	log.Println("Done")
 	if err := wc.Close(); err != nil {
 		return err
 	}
-	_, err = s.checkCmdOutput("pm", "install", "-rt", "/data/local/tmp/RotationWatcher.apk")
+	_, err = s.checkCmdOutput("pm", "install", "-rt", phoneApkPath)
 	return err
 }
 
 func (s *STFRotation) getPackagePath(name string) (path string, err error) {
-	path, err = s.checkCmdOutput("pm", "path", defaultRotationPkgName)
+	path, err = s.checkCmdOutput("pm", "path", name)
 	if err != nil {
 		return
 	}
