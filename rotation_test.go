@@ -32,6 +32,9 @@ func TestRotation(t *testing.T) {
 	start := time.Now()
 	err := r.Start()
 	assert.Nil(err)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Logf("start time used: %v", time.Since(start))
 	t.Logf("read value: %d", <-subC)
 	r.Unsubscribe(subC)

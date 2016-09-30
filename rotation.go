@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,7 +43,7 @@ func (s *STFRotation) Rotation() (int, error) {
 	if s.lastValue == -1 || s.stopped {
 		return 0, errors.New("Rotation not ready")
 	}
-	return s.lastValue
+	return s.lastValue, nil
 }
 
 func (s *STFRotation) Start() error {
@@ -56,7 +55,7 @@ func (s *STFRotation) Start() error {
 	go func() {
 		for {
 			s.wg.Add(1)
-			err := s.normalStartProcess(pmPath)
+			err := s.consoleStartProcess(pmPath)
 			if err == nil {
 				s.leftRetry = 3
 			}
@@ -119,7 +118,7 @@ func (s *STFRotation) preparePackage() (pmPath string, err error) {
 	return s.getPackagePath(defaultRotationPkgName)
 }
 
-func (s *STFRotation) normalStartProcess(pmPath string) error {
+func (s *STFRotation) consoleStartProcess(pmPath string) error {
 	fio, err := s.d.Command("CLASSPATH="+pmPath, "exec", "app_process", "/system/bin", "jp.co.cyberagent.stf.rotationwatcher.RotationWatcher")
 	if err != nil {
 		return err
@@ -135,7 +134,6 @@ func (s *STFRotation) normalStartProcess(pmPath string) error {
 		}
 		readCount += 1
 		s.pub(val)
-		log.Printf("R: %d.", val)
 	}
 	if readCount > 0 {
 		return nil
@@ -171,14 +169,15 @@ func (s *STFRotation) pushApk() error {
 }
 
 func (s *STFRotation) getPackagePath(name string) (path string, err error) {
-	path, err = s.checkCmdOutput("pm", "path", "jp.co.cyberagent.stf.rotationwatcher")
+	path, err = s.checkCmdOutput("pm", "path", defaultRotationPkgName)
 	if err != nil {
 		return
 	}
 	if strings.HasPrefix(path, "package:") {
 		path = strings.TrimSpace(path[len("package:"):])
+		return
 	}
-	return
+	return "", errors.New("not rotationwatcher package found")
 }
 
 func (s *STFRotation) checkCmdOutput(name string, args ...string) (outStr string, err error) {
