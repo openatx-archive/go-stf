@@ -17,7 +17,10 @@ import (
 	"github.com/openatx/go-adb/wire"
 )
 
-const defaultRotationPkgName = "jp.co.cyberagent.stf.rotationwatcher"
+const (
+	defaultRotationPkgName  = "jp.co.cyberagent.stf.rotationwatcher"
+	defaultRotationMaxRetry = 3
+)
 
 type STFRotation struct {
 	d           *adb.Device
@@ -34,7 +37,7 @@ func NewSTFRotation(d *adb.Device) *STFRotation {
 	return &STFRotation{
 		d:           d,
 		subscribers: make(map[chan int]bool),
-		leftRetry:   3,
+		leftRetry:   defaultRotationMaxRetry,
 		lastValue:   -1,
 	}
 }
@@ -54,26 +57,25 @@ func (s *STFRotation) Start() error {
 	}
 
 	go func() {
-		for {
+		var ok = true
+		for ok {
 			s.wg.Add(1)
 			err := s.consoleStartProcess(pmPath)
 			if err == nil {
-				s.leftRetry = 3
+				s.leftRetry = defaultRotationMaxRetry
 			} else {
 				log.Printf("rotation run failed: %v, left retry %d", err, s.leftRetry)
 			}
 
 			s.mu.Lock()
-			s.wg.Done()
 			s.leftRetry -= 1
 			if s.stopped || s.leftRetry <= 0 {
 				for subC := range s.subscribers {
 					s.Unsubscribe(subC)
-					close(subC)
 				}
-				s.mu.Unlock()
-				break
+				ok = false
 			}
+			s.wg.Done()
 			s.mu.Unlock()
 		}
 	}()
@@ -101,10 +103,12 @@ func (s *STFRotation) Subscribe() chan int {
 	return C
 }
 
+// unsubscribe will also close channel
 func (s *STFRotation) Unsubscribe(C chan int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.subscribers, C)
+	close(C)
 }
 
 func (s *STFRotation) pub(v int) {
@@ -149,7 +153,7 @@ func (s *STFRotation) consoleStartProcess(pmPath string) error {
 }
 
 func (s *STFRotation) pushApk() error {
-	_, err := s.getPackagePath(defaultRotationPkgName) // If already installed, then skip install
+	_, err := s.getPackagePath(defaultRotationPkgName) // If already installed, then skip
 	if err == nil {
 		return nil
 	}
