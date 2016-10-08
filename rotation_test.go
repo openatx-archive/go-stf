@@ -1,27 +1,11 @@
 package stf
 
 import (
-	"log"
 	"testing"
 	"time"
 
-	adb "github.com/openatx/go-adb"
 	"github.com/stretchr/testify/assert"
 )
-
-var dev *adb.Device
-
-func init() {
-	adbc, err := adb.New()
-	// adbc, err := adb.NewWithConfig(adb.ServerConfig{
-	// 	Host: "10.240.187.174",
-	// 	Port: 5555,
-	// })
-	if err != nil {
-		log.Fatal(err)
-	}
-	dev = adbc.Device(adb.AnyUsbDevice())
-}
 
 func TestRotation(t *testing.T) {
 	assert := assert.New(t)
