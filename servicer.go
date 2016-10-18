@@ -112,8 +112,8 @@ func (e *errorMixin) Wait() error {
 
 func (e *errorMixin) doneError(err error) {
 	e.once.Do(func() {
-		e.wg.Done()
 		e.err = err
+		e.wg.Done()
 	})
 }
 
