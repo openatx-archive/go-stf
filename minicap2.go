@@ -23,36 +23,41 @@ type STFCapturer struct {
 
 	*adb.Device
 	errorMixin
+	mutexMixin
 }
 
-func NewSTFCapturer(rotationC chan int) Servicer {
-	return ThreadSafeServicer(&STFCapturer{
-		quitC: make(chan bool, 1),
-	})
+func NewSTFCapturer(rotationC chan int, device *adb.Device) Servicer {
+	return &STFCapturer{
+		Device: device,
+	}
 }
 
 func (m *STFCapturer) Start() error {
-	m.resetError()
-	if err := m.pushFiles(); err != nil {
-		return err
-	}
-	minfo, err := m.prepare()
-	if err != nil {
-		return err
-	}
-	m.width = minfo.Width
-	m.height = minfo.Height
-	m.rotation = minfo.Rotation
-	m.runScreenCaptureWithRotate() // TODO
-	return nil
+	return m.safeDo(mutexActionStart,
+		func() error {
+			m.quitC = make(chan bool, 1)
+			m.resetError()
+			if err := m.pushFiles(); err != nil {
+				return err
+			}
+			minfo, err := m.prepare()
+			if err != nil {
+				return err
+			}
+			m.width = minfo.Width
+			m.height = minfo.Height
+			m.rotation = minfo.Rotation
+			m.runScreenCaptureWithRotate() // TODO
+			return nil
+		})
 }
 
 func (m *STFCapturer) Stop() error {
-	defer func() {
-		m.quitC = make(chan bool, 1)
-	}()
-	m.quitC <- true
-	return m.Wait()
+	return m.safeDo(mutexActionStop,
+		func() error {
+			m.quitC <- true
+			return m.Wait()
+		})
 }
 
 // Check whether minicap is supported on the device

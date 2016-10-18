@@ -54,40 +54,30 @@ func MultiServicer(ss ...Servicer) Servicer {
 	return &multiServ{ss}
 }
 
-type threadSafeServ struct {
+const (
+	mutexActionStart = iota
+	mutexActionStop
+)
+
+type mutexMixin struct {
 	mu      sync.Mutex
 	started bool
-	serv    Servicer
 }
 
-func (t *threadSafeServ) Start() error {
+func (t *mutexMixin) safeDo(action int, f func() error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.started {
+	if t.started && action == mutexActionStart {
 		return ErrServiceAlreadyStarted
 	}
-	return t.serv.Start()
-}
-
-func (t *threadSafeServ) Stop() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !t.started {
+	if !t.started && action == mutexActionStop {
 		return ErrServiceNotStarted
 	}
-	return t.Stop()
+	return f()
 }
 
-func (t *threadSafeServ) IsStarted() bool {
+func (t *mutexMixin) IsStarted() bool {
 	return t.started
-}
-
-func (t *threadSafeServ) Wait() error {
-	return t.serv.Wait()
-}
-
-func ThreadSafeServicer(s Servicer) Servicer {
-	return &threadSafeServ{}
 }
 
 // Mixin helper to easy write Servicer
