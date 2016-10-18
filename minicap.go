@@ -52,7 +52,7 @@ type Minicap struct {
 	wg            sync.WaitGroup
 }
 
-func NewMinicap(d *adb.Device) ScreenReader {
+func NewMinicap(d *adb.Device) *Minicap {
 	return &Minicap{
 		Device:  d,
 		stopped: true,
@@ -289,9 +289,12 @@ func (m *Minicap) keepPullScreenFromTcp() {
 	defer m.wg.Done()
 	retryLeft := 5
 	for {
+		startTime := time.Now()
 		select {
 		case <-GoFunc(m.pullScreenFromTcp):
-			// TODO(ssx): maybe need to check the running time
+			if time.Since(startTime) > time.Second*20 {
+				retryLeft = 5 // reset retry
+			}
 			if retryLeft <= 0 {
 				return
 			}
@@ -319,6 +322,7 @@ func (m *Minicap) pullScreenFromTcp() error {
 	defer conn.Close()
 	rd := bufio.NewReader(conn)
 	log.Println("Start to discard images")
+	// TODO(ssx): get image
 	io.Copy(ioutil.Discard, rd)
 	return errors.New("minicap tcp stream closed")
 }

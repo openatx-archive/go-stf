@@ -2,11 +2,6 @@ package stf
 
 import "image"
 
-type Servicer interface {
-	Start() error
-	Stop() error
-}
-
 // type Device interface {
 // Capture CaptureService
 // // Touch TouchService
