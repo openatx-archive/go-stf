@@ -58,3 +58,11 @@ func AdbFileExists(d *adb.Device, path string) bool {
 	_, err := AdbCheckOutput(d, "test", "-f", path)
 	return err == nil
 }
+
+func GoFunc(f func() error) chan error {
+	ch := make(chan error)
+	go func() {
+		ch <- f()
+	}()
+	return ch
+}

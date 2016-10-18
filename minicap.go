@@ -3,16 +3,22 @@ package stf
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"image"
+	"io"
+	"io/ioutil"
+	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/facebookgo/freeport"
 	adb "github.com/openatx/go-adb"
+	"github.com/pkg/errors"
 )
 
 var (
@@ -38,42 +44,62 @@ type Minicap struct {
 
 	width, height int
 	rotation      int
-	closed        bool
+	port          int
+	stopped       bool
+	quitC         chan bool
+	once          sync.Once
 	mu            sync.Mutex
+	wg            sync.WaitGroup
 }
 
 func NewMinicap(d *adb.Device) ScreenReader {
 	return &Minicap{
-		Device: d,
-		closed: true,
+		Device:  d,
+		stopped: true,
 	}
 }
 
+// Start twice is same as once
+// If want to restart, you have to Stop() and then Start()
 func (m *Minicap) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var err error
+	m.once.Do(func() {
+		// init variables
+		m.stopped = false
+		m.quitC = make(chan bool, 2)
 
-	if !m.closed {
-		return errors.New("minicap has not closed before start")
-	}
+		// push files and check environment
+		mi, er := m.prepare()
+		if er != nil {
+			err = errors.Wrap(er, "prepare")
+			return
+		}
+		m.width = mi.Width
+		m.height = mi.Height
+		m.rotation = mi.Rotation
+		rC := make(chan int)
+		m.wg.Add(2) // used for wait minicap process exit
 
-	mi, err := m.prepare()
-	if err != nil {
-		return err
-	}
-	m.width = mi.Width
-	m.height = mi.Height
-	m.rotation = mi.Rotation
-	rC := make(chan int)
-	m.runWithScreenRotate(rC)
-	return nil
+		// run minicap and get images
+		go m.runWithScreenRotate(rC)
+		go m.keepPullScreenFromTcp()
+	})
+	return err
 }
 
 func (m *Minicap) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	m.killMinicap()
+	if m.stopped {
+		return errors.New("already stopped")
+	}
+	m.quitC <- true // quit minicap and keepRetriveScreen
+	m.quitC <- true
+	m.wg.Wait()
+	m.once = sync.Once{} // reset sync.Once so we can call Start again
+	m.stopped = true
 	return nil
 }
 
@@ -90,40 +116,36 @@ func (m *Minicap) LastImage() (image.Image, error) {
 }
 
 func (m *Minicap) runWithScreenRotate(rotationChan chan int) error {
+	defer m.wg.Done()
 	m.killMinicap()
-	quit, err := m.runMinicap(m.rotation)
-	if err != nil {
-		return err
-	}
-	m.closed = false
-	go func() {
-		for !m.closed {
-			select {
-			case <-quit:
-				m.closed = true
-			case r := <-rotationChan:
-				if m.rotation == r {
-					continue
-				}
-				m.rotation = r
-				m.killProc("minicap", syscall.SIGKILL)
-				quit, err = m.runMinicap(m.rotation)
-				if err != nil {
-					m.closed = true
-				}
+	errC := GoFunc(m.runMinicap)
+	var restartFlag bool
+	for {
+		select {
+		case err := <-errC:
+			if !restartFlag {
+				return err
 			}
+			restartFlag = false
+			errC = GoFunc(m.runMinicap)
+		case r := <-rotationChan:
+			m.rotation = r
+			m.killMinicap()
+		case <-m.quitC:
+			m.killMinicap()
+			return nil
 		}
-	}()
+	}
 	return nil
 }
 
-func (m *Minicap) runMinicap(rotation int) (quit chan bool, err error) {
-	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.width, m.height, rotation)
-	c, err := m.Command("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-P", param, "-S")
+func (m *Minicap) runMinicap() (err error) {
+	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.width, m.height, m.rotation)
+	c, err := m.OpenCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-P", param, "-S")
 	if err != nil {
-		return nil, err
+		return
 	}
-	quit = make(chan bool, 1)
+	defer c.Close()
 	buf := bufio.NewReader(c)
 
 	// Example output below --.
@@ -135,20 +157,15 @@ func (m *Minicap) runMinicap(rotation int) (quit chan bool, err error) {
 		return
 	}
 	if !strings.Contains(string(line), "PID:") {
-		c.Close()
-		return nil, errors.New("minicap starts failed, expect output: " + string(line))
+		return errors.New("minicap starts failed, expect output: " + string(line))
 	}
-	go func() {
-		for {
-			_, _, er := buf.ReadLine()
-			if er != nil {
-				quit <- true
-				c.Close()
-				break
-			}
+	for {
+		_, _, err = buf.ReadLine()
+		if err != nil {
+			break
 		}
-	}()
-	return quit, nil
+	}
+	return
 }
 
 func (m *Minicap) killMinicap() error {
@@ -184,6 +201,7 @@ func (m *Minicap) killProc(psName string, sig syscall.Signal) (err error) {
 }
 
 // Check whether minicap is supported on the device
+// Check adb forward
 // For more information, see: https://github.com/openstf/minicap
 func (m *Minicap) prepare() (mi MinicapInfo, err error) {
 	if err = m.pushFiles(); err != nil {
@@ -193,15 +211,33 @@ func (m *Minicap) prepare() (mi MinicapInfo, err error) {
 	if err != nil {
 		return
 	}
-	// log.Println(out)
 	err = json.Unmarshal([]byte(out), &mi)
+	if err != nil {
+		return
+	}
+	m.port, err = m.prepareForward()
 	return
 }
 
 // adb forward tcp:{port} localabstract:minicap
-// TODO
-func (m *Minicap) prepareForward() error {
-	return nil
+func (m *Minicap) prepareForward() (port int, err error) {
+	fws, err := m.ForwardList()
+	if err != nil {
+		return 0, err
+	}
+	// check if already forwarded
+	for _, fw := range fws {
+		if fw.Remote.Protocol == "localabstract" && fw.Remote.PortOrName == "minicap" {
+			port, _ = strconv.Atoi(fw.Local.PortOrName)
+			return
+		}
+	}
+	port, err = freeport.Get()
+	if err != nil {
+		return
+	}
+	err = m.Forward(adb.ForwardSpec{"tcp", strconv.Itoa(port)}, adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
+	return
 }
 
 func (m *Minicap) pushFiles() error {
@@ -246,4 +282,43 @@ func (m *Minicap) removeFiles() error {
 		}
 	}
 	return nil
+}
+
+// retry with max 5
+func (m *Minicap) keepPullScreenFromTcp() {
+	defer m.wg.Done()
+	retryLeft := 5
+	for {
+		select {
+		case <-GoFunc(m.pullScreenFromTcp):
+			// TODO(ssx): maybe need to check the running time
+			if retryLeft <= 0 {
+				return
+			}
+			retryLeft -= 1
+		case <-m.quitC:
+			// no need to stop pullScreen
+			// because when minicap quit, conn will read io.EOF
+			return
+		}
+
+		// wait for the next start
+		select {
+		case <-time.After(time.Millisecond * 200):
+		case <-m.quitC:
+			return
+		}
+	}
+}
+
+func (m *Minicap) pullScreenFromTcp() error {
+	conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(m.port))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	rd := bufio.NewReader(conn)
+	log.Println("Start to discard images")
+	io.Copy(ioutil.Discard, rd)
+	return errors.New("minicap tcp stream closed")
 }

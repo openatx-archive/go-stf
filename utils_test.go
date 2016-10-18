@@ -14,7 +14,7 @@ func TestAdbFileExists(t *testing.T) {
 func TestAdbCheckOutput(t *testing.T) {
 	outStr, err := AdbCheckOutput(dev, "echo", "hello")
 	assert.NoError(t, err)
-	assert.Equal(t, "hello\r\n", outStr)
+	assert.Equal(t, "hello\n", outStr)
 }
 
 func TestPushFileFromHTTP(t *testing.T) {

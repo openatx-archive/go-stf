@@ -130,7 +130,7 @@ func (s *STFRotation) preparePackage() (pmPath string, err error) {
 }
 
 func (s *STFRotation) consoleStartProcess(pmPath string) error {
-	fio, err := s.d.Command("CLASSPATH="+pmPath, "exec", "app_process", "/system/bin", defaultRotationPkgName+".RotationWatcher")
+	fio, err := s.d.OpenCommand("CLASSPATH="+pmPath, "exec", "app_process", "/system/bin", defaultRotationPkgName+".RotationWatcher")
 	if err != nil {
 		return err
 	}
