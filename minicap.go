@@ -167,12 +167,6 @@ func (m *minicapDaemon) runScreenCaptureWithRotate() {
 }
 
 func (m *minicapDaemon) runScreenCapture() (err error) {
-	if m.maxWidth <= 0 {
-		m.maxWidth = m.width
-	}
-	if m.maxHeight <= 0 {
-		m.maxHeight = m.height
-	}
 	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.maxWidth, m.maxHeight, m.rotation)
 	c, err := m.OpenCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-P", param, "-S")
 	if err != nil {
