@@ -33,11 +33,12 @@ type minicapInfo struct {
 }
 
 type minicapDaemon struct {
-	width, height int
-	rotation      int
-	port          int
-	quitC         chan bool
-	rotationC     chan int
+	width, height       int
+	maxWidth, maxHeight int
+	rotation            int
+	port                int
+	quitC               chan bool
+	rotationC           chan int
 
 	*adb.Device
 	errorMixin
@@ -45,9 +46,14 @@ type minicapDaemon struct {
 }
 
 func newMinicapDaemon(rotationC chan int, device *adb.Device) *minicapDaemon {
+	if rotationC == nil {
+		rotationC = make(chan int)
+	}
 	return &minicapDaemon{
 		rotationC: rotationC,
 		Device:    device,
+		maxWidth:  720,
+		maxHeight: 720,
 	}
 }
 
@@ -128,6 +134,12 @@ func (m *minicapDaemon) pushFiles() error {
 	return nil
 }
 
+func (m *minicapDaemon) SetMaxWidthHeight(width int, height int) {
+	m.maxWidth = width
+	m.maxHeight = height
+	m.rotationC <- m.rotation
+}
+
 func (m *minicapDaemon) runScreenCaptureWithRotate() {
 	m.killMinicap()
 	var err error
@@ -155,7 +167,13 @@ func (m *minicapDaemon) runScreenCaptureWithRotate() {
 }
 
 func (m *minicapDaemon) runScreenCapture() (err error) {
-	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.width, m.height, m.rotation)
+	if m.maxWidth <= 0 {
+		m.maxWidth = m.width
+	}
+	if m.maxHeight <= 0 {
+		m.maxHeight = m.height
+	}
+	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.maxWidth, m.maxHeight, m.rotation)
 	c, err := m.OpenCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-P", param, "-S")
 	if err != nil {
 		return
