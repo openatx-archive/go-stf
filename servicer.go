@@ -56,8 +56,8 @@ func MultiServicer(ss ...Servicer) Servicer {
 
 // Mutex
 const (
-	ACTION_START = iota
-	ACTION_STOP
+	_ACTION_START = iota
+	_ACTION_STOP
 )
 
 type safeMixin struct {

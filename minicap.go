@@ -19,6 +19,13 @@ import (
 	adb "github.com/openatx/go-adb"
 )
 
+const (
+	QUALITY_1080P = 1
+	QUALITY_720P  = 2
+	QUALITY_480P  = 3
+	QUALITY_240P  = 4
+)
+
 type minicapInfo struct {
 	Id       int     `json:"id"`
 	Width    int     `json:"width"`
@@ -134,11 +141,28 @@ func (m *minicapDaemon) pushFiles() error {
 	return nil
 }
 
-func (m *minicapDaemon) SetMaxWidthHeight(width int, height int) {
-	m.maxWidth = width
-	m.maxHeight = height
-	m.rotationC <- m.rotation
+// TODO(ssx): setQuality
+func (m *minicapDaemon) SetQuality(quality int) {
+	switch quality {
+	case QUALITY_1080P:
+		m.maxHeight, m.maxHeight = 1080, 1080
+	case QUALITY_720P:
+		m.maxHeight, m.maxHeight = 720, 720
+	case QUALITY_480P:
+		m.maxHeight, m.maxHeight = 480, 480
+	case QUALITY_240P:
+		m.maxHeight, m.maxHeight = 240, 240
+	default:
+		return
+	}
+	m.rotationC <- m.rotation // force restart minicap
 }
+
+// func (m *minicapDaemon) SetMaxWidthHeight(width int, height int) {
+// 	m.maxWidth = width
+// 	m.maxHeight = height
+// 	m.rotationC <- m.rotation
+// }
 
 func (m *minicapDaemon) runScreenCaptureWithRotate() {
 	m.killMinicap()
@@ -239,7 +263,7 @@ type jpgTcpSucker struct {
 }
 
 func (s *jpgTcpSucker) Start() error {
-	return s.safeDo(ACTION_START, func() error {
+	return s.safeDo(_ACTION_START, func() error {
 		s.resetError()
 		var err error
 		s.C = make(chan []byte, 3)
@@ -254,7 +278,7 @@ func (s *jpgTcpSucker) Start() error {
 }
 
 func (s *jpgTcpSucker) Stop() error {
-	return s.safeDo(ACTION_STOP, func() error {
+	return s.safeDo(_ACTION_STOP, func() error {
 		s.quitC <- true
 		if s.conn != nil {
 			s.conn.Close()
