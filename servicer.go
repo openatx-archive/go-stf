@@ -54,31 +54,89 @@ func MultiServicer(ss ...Servicer) Servicer {
 	return &multiServ{ss}
 }
 
+// Mutex
 const (
-	mutexActionStart = iota
-	mutexActionStop
+	ACTION_START = iota
+	ACTION_STOP
 )
 
-type mutexMixin struct {
+type safeMixin struct {
 	mu      sync.Mutex
 	started bool
 }
 
-func (t *mutexMixin) safeDo(action int, f func() error) error {
+func (t *safeMixin) safeDo(action int, f func() error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.started && action == mutexActionStart {
+	if t.started && action == ACTION_START {
 		return ErrServiceAlreadyStarted
 	}
-	if !t.started && action == mutexActionStop {
+	if !t.started && action == ACTION_STOP {
 		return ErrServiceNotStarted
 	}
+	t.started = (action == ACTION_START)
 	return f()
 }
 
-func (t *mutexMixin) IsStarted() bool {
+func (t *safeMixin) IsStarted() bool {
 	return t.started
 }
+
+// Mutex retry
+// type safeErrorMixin struct {
+// 	safeMixin
+// 	errorMixin
+// 	errC      chan error
+// 	maxRetry  int
+// 	f         func() error
+// 	startFunc func() error
+// 	stopFunc  func() error
+// }
+
+// func (t *safeErrorMixin) safeRetryDo(maxRetry int, dur time.Duration,
+// 	startFunc func() error, stopFunc func() error) error {
+// 	return t.safeDo(action, func() error {
+// 		t.maxRetry = maxRetry
+// 		t.startFunc = startFunc
+// 		t.stopFunc = stopFunc
+// 		t.errC = make(chan error, 1)
+// 		return t.doWithRetry()
+// 	})
+// }
+
+// func (t *safeErrorMixin) doWithRetry() error {
+// 	if err := t.startFunc(); err != nil {
+// 		return err
+// 	}
+// 	go func() {
+// 		leftRetry := t.maxRetry
+// 		for leftRetry > 0 {
+// 			startTime := time.Now()
+// 			err := t.Wait()
+// 			if err != nil {
+// 				leftRetry -= 1
+// 				if time.Since(startTime) > 20*time.Second {
+// 					leftRetry = t.maxRetry
+// 				}
+// 				t.stopFunc()
+// 				// t.Stop()
+// 			}
+// 		}
+// 	}()
+// }
+
+// // if exit retry again
+// func (t *safeErrorMixin) Wait() error {
+// 	err := t.errorMixin.Wait()
+// 	// errC := GoFunc(t.errorMixin.Wait)
+// 	// select {
+// 	// case <- errC:
+// 	// }
+// 	return err
+// }
+
+// func (t *mutexRetryMixin) Wait() error {
+// }
 
 // Mixin helper to easy write Servicer
 type errorMixin struct {
@@ -110,24 +168,3 @@ func (e *errorMixin) doneError(err error) {
 func (e *errorMixin) doneNilError() {
 	e.doneError(nil)
 }
-
-// type SleepService struct {
-// 	cmd *exec.Cmd
-// 	errorMixin
-// }
-
-// func (s *SleepService) Start() error {
-// 	s.cmd = exec.Command("sleep", "10")
-// 	go func() {
-// 		s.writeError(s.cmd.Run())
-// 	}()
-// 	return nil
-// }
-
-// func (s *SleepService) Stop() error {
-// 	defer s.doneNilError()
-// 	if s.cmd != nil && s.cmd.Process != nil {
-// 		return s.cmd.Process.Kill()
-// 	}
-// 	return nil
-// }

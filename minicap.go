@@ -2,28 +2,21 @@ package stf
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"image"
 	"io"
-	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/facebookgo/freeport"
 	adb "github.com/openatx/go-adb"
-	"github.com/pkg/errors"
-)
-
-var (
-	defaultMinicapFiles = []string{"/data/local/tmp/minicap", "/data/local/tmp/minicap.so"}
-	ErrMinicapQuited    = errors.New("minicap quited")
 )
 
 type MinicapInfo struct {
@@ -39,171 +32,57 @@ type MinicapInfo struct {
 	Rotation int     `json:"rotation"`
 }
 
-type Minicap struct {
-	*adb.Device
-
+type minicapDaemon struct {
 	width, height int
 	rotation      int
 	port          int
-	stopped       bool
 	quitC         chan bool
-	once          sync.Once
-	mu            sync.Mutex
-	wg            sync.WaitGroup
+	rotationC     chan int
+
+	*adb.Device
+	errorMixin
+	safeMixin
 }
 
-func NewMinicap(d *adb.Device) *Minicap {
-	return &Minicap{
-		Device:  d,
-		stopped: true,
+func newMinicapDaemon(rotationC chan int, device *adb.Device) *minicapDaemon {
+	return &minicapDaemon{
+		rotationC: rotationC,
+		Device:    device,
 	}
 }
 
-// Start twice is same as once
-// If want to restart, you have to Stop() and then Start()
-func (m *Minicap) Start() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var err error
-	m.once.Do(func() {
-		// init variables
-		m.stopped = false
-		m.quitC = make(chan bool, 2)
-
-		// push files and check environment
-		mi, er := m.prepare()
-		if er != nil {
-			err = errors.Wrap(er, "prepare")
-			return
-		}
-		m.width = mi.Width
-		m.height = mi.Height
-		m.rotation = mi.Rotation
-		rC := make(chan int)
-		m.wg.Add(2) // used for wait minicap process exit
-
-		// run minicap and get images
-		go m.runWithScreenRotate(rC)
-		go m.keepPullScreenFromTcp()
-	})
-	return err
-}
-
-func (m *Minicap) Stop() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.stopped {
-		return errors.New("already stopped")
-	}
-	m.quitC <- true // quit minicap and keepRetriveScreen
-	m.quitC <- true
-	m.wg.Wait()
-	m.once = sync.Once{} // reset sync.Once so we can call Start again
-	m.stopped = true
-	return nil
-}
-
-func (m *Minicap) Subscribe() (chan image.Image, error) {
-	return nil, nil
-}
-
-func (m *Minicap) NextImage() (image.Image, error) {
-	return nil, nil
-}
-
-func (m *Minicap) LastImage() (image.Image, error) {
-	return nil, nil
-}
-
-func (m *Minicap) runWithScreenRotate(rotationChan chan int) error {
-	defer m.wg.Done()
-	m.killMinicap()
-	errC := GoFunc(m.runMinicap)
-	var restartFlag bool
-	for {
-		select {
-		case err := <-errC:
-			if !restartFlag {
+func (m *minicapDaemon) Start() error {
+	return m.safeDo(ACTION_START,
+		func() error {
+			m.quitC = make(chan bool, 1)
+			m.resetError()
+			if err := m.pushFiles(); err != nil {
 				return err
 			}
-			restartFlag = false
-			errC = GoFunc(m.runMinicap)
-		case r := <-rotationChan:
-			m.rotation = r
-			m.killMinicap()
-		case <-m.quitC:
-			m.killMinicap()
+			minfo, err := m.prepare()
+			if err != nil {
+				return err
+			}
+			m.width = minfo.Width
+			m.height = minfo.Height
+			m.rotation = minfo.Rotation
+			go m.runScreenCaptureWithRotate() // TODO
 			return nil
-		}
-	}
-	return nil
+		})
 }
 
-func (m *Minicap) runMinicap() (err error) {
-	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.width, m.height, m.rotation)
-	c, err := m.OpenCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-P", param, "-S")
-	if err != nil {
-		return
-	}
-	defer c.Close()
-	buf := bufio.NewReader(c)
-
-	// Example output below --.
-	// PID: 9355
-	// INFO: Using projection 720x1280@720x1280/0
-	// INFO: (jni/minicap/JpgEncoder.cpp:64) Allocating 2766852 bytes for JPG encoder
-	line, _, err := buf.ReadLine()
-	if err != nil {
-		return
-	}
-	if !strings.Contains(string(line), "PID:") {
-		return errors.New("minicap starts failed, expect output: " + string(line))
-	}
-	for {
-		_, _, err = buf.ReadLine()
-		if err != nil {
-			break
-		}
-	}
-	return
-}
-
-func (m *Minicap) killMinicap() error {
-	return m.killProc("minicap", syscall.SIGKILL)
-}
-
-// FIXME(ssx): maybe need to put into go-adb
-func (m *Minicap) killProc(psName string, sig syscall.Signal) (err error) {
-	out, err := m.RunCommand("ps", "-C", psName)
-	if err != nil {
-		return
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) <= 1 {
-		return errors.New("No process named " + psName + " founded.")
-	}
-	var pidIndex int
-	for idx, val := range strings.Fields(lines[0]) {
-		if val == "PID" {
-			pidIndex = idx
-			break
-		}
-	}
-	for _, line := range lines[1:] {
-		fields := strings.Fields(line)
-		if !strings.Contains(line, psName) {
-			continue
-		}
-		pid := fields[pidIndex]
-		m.RunCommand("kill", "-"+strconv.Itoa(int(sig)), pid)
-	}
-	return
+func (m *minicapDaemon) Stop() error {
+	return m.safeDo(ACTION_STOP,
+		func() error {
+			m.quitC <- true
+			return m.Wait()
+		})
 }
 
 // Check whether minicap is supported on the device
 // Check adb forward
 // For more information, see: https://github.com/openstf/minicap
-func (m *Minicap) prepare() (mi MinicapInfo, err error) {
+func (m *minicapDaemon) prepare() (mi MinicapInfo, err error) {
 	if err = m.pushFiles(); err != nil {
 		return
 	}
@@ -212,35 +91,10 @@ func (m *Minicap) prepare() (mi MinicapInfo, err error) {
 		return
 	}
 	err = json.Unmarshal([]byte(out), &mi)
-	if err != nil {
-		return
-	}
-	m.port, err = m.prepareForward()
 	return
 }
 
-// adb forward tcp:{port} localabstract:minicap
-func (m *Minicap) prepareForward() (port int, err error) {
-	fws, err := m.ForwardList()
-	if err != nil {
-		return 0, err
-	}
-	// check if already forwarded
-	for _, fw := range fws {
-		if fw.Remote.Protocol == "localabstract" && fw.Remote.PortOrName == "minicap" {
-			port, _ = strconv.Atoi(fw.Local.PortOrName)
-			return
-		}
-	}
-	port, err = freeport.Get()
-	if err != nil {
-		return
-	}
-	err = m.Forward(adb.ForwardSpec{"tcp", strconv.Itoa(port)}, adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
-	return
-}
-
-func (m *Minicap) pushFiles() error {
+func (m *minicapDaemon) pushFiles() error {
 	props, err := m.Properties()
 	if err != nil {
 		return err
@@ -274,55 +128,261 @@ func (m *Minicap) pushFiles() error {
 	return nil
 }
 
-func (m *Minicap) removeFiles() error {
-	for _, filePath := range defaultMinicapFiles {
-		_, err := m.RunCommand("rm", filePath) // some phone got no -f flag
+func (m *minicapDaemon) runScreenCaptureWithRotate() {
+	m.killMinicap()
+	var err error
+	defer m.doneError(err)
+	errC := GoFunc(m.runScreenCapture)
+	var needRestart bool
+	for {
+		select {
+		case err = <-errC: // when normal exit, that is an error
+			if !needRestart {
+				return
+			}
+			needRestart = false
+			err = nil
+			errC = GoFunc(m.runScreenCapture)
+		case r := <-m.rotationC:
+			needRestart = true
+			m.rotation = r
+			m.killMinicap()
+		case <-m.quitC:
+			m.killMinicap()
+			return
+		}
+	}
+}
+
+func (m *minicapDaemon) runScreenCapture() (err error) {
+	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.width, m.height, m.rotation)
+	c, err := m.OpenCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-P", param, "-S")
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	buf := bufio.NewReader(c)
+
+	// Example output below --.
+	// PID: 9355
+	// INFO: Using projection 720x1280@720x1280/0
+	// INFO: (jni/minicap/JpgEncoder.cpp:64) Allocating 2766852 bytes for JPG encoder
+	line, _, err := buf.ReadLine()
+	if err != nil {
+		return
+	}
+	if !strings.Contains(string(line), "PID:") {
+		return errors.New("minicap starts failed, expect output: " + string(line))
+	}
+	for {
+		_, _, err = buf.ReadLine()
+		if err != nil {
+			break
+		}
+	}
+	return
+}
+
+func (m *minicapDaemon) killMinicap() error {
+	return m.killProc("minicap", syscall.SIGKILL)
+}
+
+// FIXME(ssx): maybe need to put into go-adb
+func (m *minicapDaemon) killProc(psName string, sig syscall.Signal) (err error) {
+	out, err := m.RunCommand("ps", "-C", psName)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) <= 1 {
+		return errors.New("No process named " + psName + " founded.")
+	}
+	var pidIndex int
+	for idx, val := range strings.Fields(lines[0]) {
+		if val == "PID" {
+			pidIndex = idx
+			break
+		}
+	}
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if !strings.Contains(line, psName) {
+			continue
+		}
+		pid := fields[pidIndex]
+		m.RunCommand("kill", "-"+strconv.Itoa(int(sig)), pid)
+	}
+	return
+}
+
+type STFCaptureListener struct {
+	port  int
+	conn  net.Conn
+	quitC chan bool
+	C     chan []byte
+
+	errorMixin
+	safeMixin
+	*adb.Device
+}
+
+func (s *STFCaptureListener) Start() error {
+	return s.safeDo(ACTION_START, func() error {
+		s.resetError()
+		var err error
+		s.C = make(chan []byte, 3)
+		s.quitC = make(chan bool, 1)
+		s.port, err = s.prepareForward()
 		if err != nil {
 			return err
+		}
+		go s.keepReadFromTcp()
+		return nil
+	})
+}
+
+func (s *STFCaptureListener) Stop() error {
+	return s.safeDo(ACTION_STOP, func() error {
+		s.quitC <- true
+		if s.conn != nil {
+			s.conn.Close()
+		}
+		return s.Wait()
+	})
+}
+
+// adb forward tcp:{port} localabstract:minicap
+// TODO(ssx): make another service: CaptureTcpReadService
+func (s *STFCaptureListener) prepareForward() (port int, err error) {
+	fws, err := s.ForwardList()
+	if err != nil {
+		return 0, err
+	}
+	// check if already forwarded
+	for _, fw := range fws {
+		if fw.Remote.Protocol == "localabstract" && fw.Remote.PortOrName == "minicap" {
+			port, _ = strconv.Atoi(fw.Local.PortOrName)
+			return
+		}
+	}
+	port, err = freeport.Get()
+	if err != nil {
+		return
+	}
+	err = s.Forward(adb.ForwardSpec{"tcp", strconv.Itoa(port)}, adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
+	return
+}
+
+type errorBinaryReader struct {
+	rd  io.Reader
+	err error
+}
+
+func (r *errorBinaryReader) ReadInto(datas ...interface{}) error {
+	if r.err != nil {
+		return r.err
+	}
+	for _, data := range datas {
+		r.err = binary.Read(r.rd, binary.LittleEndian, data)
+		if r.err != nil {
+			return r.err
 		}
 	}
 	return nil
 }
 
-// retry with max 5
-func (m *Minicap) keepPullScreenFromTcp() {
-	defer m.wg.Done()
-	retryLeft := 5
+// TODO(ssx): Do not add retry for now
+func (s *STFCaptureListener) keepReadFromTcp() (err error) {
+	defer s.doneError(err)
 	for {
-		startTime := time.Now()
 		select {
-		case <-GoFunc(m.pullScreenFromTcp):
-			if time.Since(startTime) > time.Second*20 {
-				retryLeft = 5 // reset retry
-			}
-			if retryLeft <= 0 {
-				return
-			}
-			retryLeft -= 1
-		case <-m.quitC:
-			// no need to stop pullScreen
-			// because when minicap quit, conn will read io.EOF
-			return
+		case err = <-GoFunc(s.readFromTcp):
+		case <-s.quitC:
+			return nil
 		}
-
-		// wait for the next start
 		select {
-		case <-time.After(time.Millisecond * 200):
-		case <-m.quitC:
-			return
+		case <-time.After(1000 * time.Millisecond):
+		case <-s.quitC:
+			return nil
 		}
 	}
 }
 
-func (m *Minicap) pullScreenFromTcp() error {
-	conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(m.port))
+func (s *STFCaptureListener) readFromTcp() (err error) {
+	conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(s.port))
+	if err != nil {
+		return
+	}
+	s.conn = conn
+	defer conn.Close()
+
+	var pid, rw, rh, vw, vh uint32
+	var version, unused, orientation uint8
+
+	rd := bufio.NewReader(conn)
+	binRd := errorBinaryReader{rd: rd}
+	err = binRd.ReadInto(&version, &unused, &pid, &rw, &rh, &vw, &vh, &orientation, &unused)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	rd := bufio.NewReader(conn)
-	log.Println("Start to discard images")
-	// TODO(ssx): get image
-	io.Copy(ioutil.Discard, rd)
-	return errors.New("minicap tcp stream closed")
+
+	for {
+		var size uint32
+		if err = binRd.ReadInto(&size); err != nil {
+			break
+		}
+
+		lr := &io.LimitedReader{rd, int64(size)}
+		buf := bytes.NewBuffer(nil)
+		_, err = io.Copy(buf, lr)
+		if err != nil {
+			break
+		}
+		if string(buf.Bytes()[:2]) != "\xff\xd8" {
+			err = errors.New("jpeg format error, not starts with 0xff,0xd8")
+			break
+		}
+		select {
+		case s.C <- buf.Bytes(): // Maybe should use buffer instead
+		default:
+			// image should not wait or it will stuck here
+		}
+	}
+	return err
+}
+
+type multiError struct {
+	errs []error
+}
+
+func wrapMultiError(errs ...error) error {
+	merr := multiError{make([]error, 0)}
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		merr.errs = append(merr.errs, err)
+	}
+	if len(merr.errs) == 0 {
+		return nil
+	}
+	return merr
+}
+
+func (s *STFCapturer) Start() error {
+	return wrapMultiError(
+		s.minicapDaemon.Start(),
+		s.STFCaptureListener.Start())
+}
+
+func (s *STFCapturer) Stop() error {
+	return wrapMultiError(
+		s.minicapDaemon.Stop(),
+		s.STFCaptureListener.Stop())
+}
+
+func (s *STFCapturer) Wait() error {
+	return wrapMultiError(
+		s.minicapDaemon.Wait(),
+		s.STFCaptureListener.Wait())
 }

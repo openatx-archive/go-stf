@@ -20,4 +20,5 @@ func init() {
 		log.Fatal(err)
 	}
 	dev = adbc.Device(adb.AnyUsbDevice())
+	log.Println(dev)
 }
