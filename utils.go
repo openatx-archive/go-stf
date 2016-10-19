@@ -67,6 +67,10 @@ func GoFunc(f func() error) chan error {
 	return ch
 }
 
+type multiError struct {
+	errs []error
+}
+
 func (m multiError) Error() string {
 	var errStrs = make([]string, 0, len(m.errs))
 	for _, err := range m.errs {
@@ -75,14 +79,16 @@ func (m multiError) Error() string {
 	return strings.Join(errStrs, "; ")
 }
 
-type STFCapturer struct {
-	*minicapDaemon
-	*STFCaptureListener
-}
-
-func NewSTFCapturer(device *adb.Device) *STFCapturer {
-	return &STFCapturer{
-		minicapDaemon:      newMinicapDaemon(nil, device),
-		STFCaptureListener: &STFCaptureListener{Device: device},
+func wrapMultiError(errs ...error) error {
+	merr := multiError{make([]error, 0)}
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		merr.errs = append(merr.errs, err)
 	}
+	if len(merr.errs) == 0 {
+		return nil
+	}
+	return merr
 }

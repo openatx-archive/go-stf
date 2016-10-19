@@ -19,7 +19,7 @@ import (
 	adb "github.com/openatx/go-adb"
 )
 
-type MinicapInfo struct {
+type minicapInfo struct {
 	Id       int     `json:"id"`
 	Width    int     `json:"width"`
 	Height   int     `json:"height"`
@@ -82,7 +82,7 @@ func (m *minicapDaemon) Stop() error {
 // Check whether minicap is supported on the device
 // Check adb forward
 // For more information, see: https://github.com/openstf/minicap
-func (m *minicapDaemon) prepare() (mi MinicapInfo, err error) {
+func (m *minicapDaemon) prepare() (mi minicapInfo, err error) {
 	if err = m.pushFiles(); err != nil {
 		return
 	}
@@ -215,7 +215,7 @@ func (m *minicapDaemon) killProc(psName string, sig syscall.Signal) (err error) 
 	return
 }
 
-type STFCaptureListener struct {
+type jpgTcpSucker struct {
 	port  int
 	conn  net.Conn
 	quitC chan bool
@@ -226,7 +226,7 @@ type STFCaptureListener struct {
 	*adb.Device
 }
 
-func (s *STFCaptureListener) Start() error {
+func (s *jpgTcpSucker) Start() error {
 	return s.safeDo(ACTION_START, func() error {
 		s.resetError()
 		var err error
@@ -241,7 +241,7 @@ func (s *STFCaptureListener) Start() error {
 	})
 }
 
-func (s *STFCaptureListener) Stop() error {
+func (s *jpgTcpSucker) Stop() error {
 	return s.safeDo(ACTION_STOP, func() error {
 		s.quitC <- true
 		if s.conn != nil {
@@ -253,7 +253,7 @@ func (s *STFCaptureListener) Stop() error {
 
 // adb forward tcp:{port} localabstract:minicap
 // TODO(ssx): make another service: CaptureTcpReadService
-func (s *STFCaptureListener) prepareForward() (port int, err error) {
+func (s *jpgTcpSucker) prepareForward() (port int, err error) {
 	fws, err := s.ForwardList()
 	if err != nil {
 		return 0, err
@@ -292,7 +292,7 @@ func (r *errorBinaryReader) ReadInto(datas ...interface{}) error {
 }
 
 // TODO(ssx): Do not add retry for now
-func (s *STFCaptureListener) keepReadFromTcp() (err error) {
+func (s *jpgTcpSucker) keepReadFromTcp() (err error) {
 	defer s.doneError(err)
 	for {
 		select {
@@ -308,7 +308,7 @@ func (s *STFCaptureListener) keepReadFromTcp() (err error) {
 	}
 }
 
-func (s *STFCaptureListener) readFromTcp() (err error) {
+func (s *jpgTcpSucker) readFromTcp() (err error) {
 	conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(s.port))
 	if err != nil {
 		return
@@ -351,38 +351,32 @@ func (s *STFCaptureListener) readFromTcp() (err error) {
 	return err
 }
 
-type multiError struct {
-	errs []error
+type STFCapturer struct {
+	*minicapDaemon
+	*jpgTcpSucker
 }
 
-func wrapMultiError(errs ...error) error {
-	merr := multiError{make([]error, 0)}
-	for _, err := range errs {
-		if err == nil {
-			continue
-		}
-		merr.errs = append(merr.errs, err)
+func NewSTFCapturer(device *adb.Device) *STFCapturer {
+	return &STFCapturer{
+		minicapDaemon: newMinicapDaemon(nil, device),
+		jpgTcpSucker:  &jpgTcpSucker{Device: device},
 	}
-	if len(merr.errs) == 0 {
-		return nil
-	}
-	return merr
 }
 
 func (s *STFCapturer) Start() error {
 	return wrapMultiError(
 		s.minicapDaemon.Start(),
-		s.STFCaptureListener.Start())
+		s.jpgTcpSucker.Start())
 }
 
 func (s *STFCapturer) Stop() error {
 	return wrapMultiError(
 		s.minicapDaemon.Stop(),
-		s.STFCaptureListener.Stop())
+		s.jpgTcpSucker.Stop())
 }
 
 func (s *STFCapturer) Wait() error {
 	return wrapMultiError(
 		s.minicapDaemon.Wait(),
-		s.STFCaptureListener.Wait())
+		s.jpgTcpSucker.Wait())
 }
