@@ -65,7 +65,7 @@ func newMinicapDaemon(rotationC chan int, device *adb.Device) *minicapDaemon {
 }
 
 func (m *minicapDaemon) Start() error {
-	return m.safeDo(ACTION_START,
+	return m.safeDo(_ACTION_START,
 		func() error {
 			m.quitC = make(chan bool, 1)
 			m.resetError()
@@ -85,7 +85,7 @@ func (m *minicapDaemon) Start() error {
 }
 
 func (m *minicapDaemon) Stop() error {
-	return m.safeDo(ACTION_STOP,
+	return m.safeDo(_ACTION_STOP,
 		func() error {
 			m.quitC <- true
 			return m.Wait()

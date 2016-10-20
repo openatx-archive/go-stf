@@ -68,13 +68,13 @@ type safeMixin struct {
 func (t *safeMixin) safeDo(action int, f func() error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.started && action == ACTION_START {
+	if t.started && action == _ACTION_START {
 		return ErrServiceAlreadyStarted
 	}
-	if !t.started && action == ACTION_STOP {
+	if !t.started && action == _ACTION_STOP {
 		return ErrServiceNotStarted
 	}
-	t.started = (action == ACTION_START)
+	t.started = (action == _ACTION_START)
 	return f()
 }
 
