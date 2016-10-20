@@ -392,9 +392,9 @@ type STFCapturer struct {
 	*jpgTcpSucker
 }
 
-func NewSTFCapturer(device *adb.Device) *STFCapturer {
+func NewSTFCapturer(device *adb.Device, rotationC chan int) *STFCapturer {
 	return &STFCapturer{
-		minicapDaemon: newMinicapDaemon(nil, device),
+		minicapDaemon: newMinicapDaemon(rotationC, device),
 		jpgTcpSucker:  &jpgTcpSucker{Device: device},
 	}
 }
