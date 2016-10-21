@@ -10,7 +10,7 @@ import (
 )
 
 func TestSTFCapturer(t *testing.T) {
-	cap := NewSTFCapturer(dev)
+	cap := NewSTFCapturer(dev, nil)
 	err := cap.Start()
 	assert.NoError(t, err)
 
