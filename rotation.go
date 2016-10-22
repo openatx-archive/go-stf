@@ -3,7 +3,6 @@ package stf
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +14,7 @@ import (
 
 	adb "github.com/openatx/go-adb"
 	"github.com/openatx/go-adb/wire"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -132,7 +132,7 @@ func (s *STFRotation) preparePackage() (pmPath string, err error) {
 func (s *STFRotation) consoleStartProcess(pmPath string) error {
 	fio, err := s.d.OpenCommand("CLASSPATH="+pmPath, "exec", "app_process", "/system/bin", defaultRotationPkgName+".RotationWatcher")
 	if err != nil {
-		return err
+		return errors.Wrap(err, "start rotation.apk")
 	}
 	s.cmdConn = fio
 	defer fio.Close()
@@ -170,7 +170,7 @@ func (s *STFRotation) pushApk() error {
 		return errors.New("http download rotation watcher status " + resp.Status)
 	}
 	defer resp.Body.Close()
-	log.Println("Downloading RotationWatcher.apk ...")
+	log.Println("downloading RotationWatcher.apk ...")
 	if _, err = io.Copy(wc, resp.Body); err != nil {
 		return err
 	}

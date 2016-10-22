@@ -27,7 +27,7 @@ func PushFileFromHTTP(d *adb.Device, dst string, perms os.FileMode, urlStr strin
 		return fmt.Errorf("http download <%s> status %v", urlStr, resp.Status)
 	}
 	defer resp.Body.Close()
-	log.Printf("Downloading to %s ...", dst)
+	log.Printf("downloading to %s ...", dst)
 	if _, err = io.Copy(wc, resp.Body); err != nil {
 		return err
 	}

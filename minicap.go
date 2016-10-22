@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/facebookgo/freeport"
 	adb "github.com/openatx/go-adb"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -67,14 +66,12 @@ func newMinicapDaemon(rotationC chan int, device *adb.Device) *minicapDaemon {
 func (m *minicapDaemon) Start() error {
 	return m.safeDo(_ACTION_START,
 		func() error {
-			m.quitC = make(chan bool, 1)
 			m.resetError()
-			if err := m.pushFiles(); err != nil {
-				return err
-			}
-			minfo, err := m.prepare()
+			m.quitC = make(chan bool, 1)
+			m.killMinicap()
+			minfo, err := m.prepareSafe()
 			if err != nil {
-				return err
+				return errors.Wrap(err, "prepare minicap")
 			}
 			m.width = minfo.Width
 			m.height = minfo.Height
@@ -92,6 +89,20 @@ func (m *minicapDaemon) Stop() error {
 		})
 }
 
+// minicap may say resource is busy ..
+func (m *minicapDaemon) prepareSafe() (mi minicapInfo, err error) {
+	n := 0
+	for {
+		mi, err = m.prepare()
+		if err == nil || n >= 3 {
+			return
+		}
+		m.killMinicap()
+		time.Sleep(20 * time.Millisecond)
+		n += 1
+	}
+}
+
 // Check whether minicap is supported on the device
 // Check adb forward
 // For more information, see: https://github.com/openstf/minicap
@@ -101,6 +112,7 @@ func (m *minicapDaemon) prepare() (mi minicapInfo, err error) {
 	}
 	out, err := m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-i")
 	if err != nil {
+		err = errors.Wrap(err, "run minicap -i")
 		return
 	}
 	err = json.Unmarshal([]byte(out), &mi)
@@ -157,12 +169,6 @@ func (m *minicapDaemon) SetQuality(quality int) {
 	}
 	m.rotationC <- m.rotation // force restart minicap
 }
-
-// func (m *minicapDaemon) SetMaxWidthHeight(width int, height int) {
-// 	m.maxWidth = width
-// 	m.maxHeight = height
-// 	m.rotationC <- m.rotation
-// }
 
 func (m *minicapDaemon) runScreenCaptureWithRotate() {
 	m.killMinicap()
@@ -288,25 +294,8 @@ func (s *jpgTcpSucker) Stop() error {
 }
 
 // adb forward tcp:{port} localabstract:minicap
-// TODO(ssx): make another service: CaptureTcpReadService
 func (s *jpgTcpSucker) prepareForward() (port int, err error) {
-	fws, err := s.ForwardList()
-	if err != nil {
-		return 0, err
-	}
-	// check if already forwarded
-	for _, fw := range fws {
-		if fw.Remote.Protocol == "localabstract" && fw.Remote.PortOrName == "minicap" {
-			port, _ = strconv.Atoi(fw.Local.PortOrName)
-			return
-		}
-	}
-	port, err = freeport.Get()
-	if err != nil {
-		return
-	}
-	err = s.Forward(adb.ForwardSpec{"tcp", strconv.Itoa(port)}, adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
-	return
+	return s.ForwardToFreePort(adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
 }
 
 type errorBinaryReader struct {

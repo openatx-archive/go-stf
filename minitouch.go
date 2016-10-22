@@ -49,7 +49,10 @@ func (s *STFTouch) Start() error {
 			return err
 		}
 		go s.runBinary()
-		go s.drainCmd()
+		go func() {
+			time.Sleep(time.Second)
+			s.drainCmd()
+		}()
 		return nil
 	})
 }
