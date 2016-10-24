@@ -170,6 +170,13 @@ func (m *minicapDaemon) SetQuality(quality int) {
 	m.rotationC <- m.rotation // force restart minicap
 }
 
+func (m *minicapDaemon) SetRotation(r int) {
+	select {
+	case m.rotationC <- r:
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func (m *minicapDaemon) runScreenCaptureWithRotate() {
 	m.killMinicap()
 	var err error
@@ -342,11 +349,11 @@ func (s *jpgTcpSucker) readFromTcp() (err error) {
 	defer conn.Close()
 
 	var pid, rw, rh, vw, vh uint32
-	var version, unused, orientation uint8
+	var version, unused, orientation, quirkFlag uint8
 
 	rd := bufio.NewReader(conn)
 	binRd := errorBinaryReader{rd: rd}
-	err = binRd.ReadInto(&version, &unused, &pid, &rw, &rh, &vw, &vh, &orientation, &unused)
+	err = binRd.ReadInto(&version, &unused, &pid, &rw, &rh, &vw, &vh, &orientation, &quirkFlag)
 	if err != nil {
 		return err
 	}
@@ -381,9 +388,9 @@ type STFCapturer struct {
 	*jpgTcpSucker
 }
 
-func NewSTFCapturer(device *adb.Device, rotationC chan int) *STFCapturer {
+func NewSTFCapturer(device *adb.Device) *STFCapturer {
 	return &STFCapturer{
-		minicapDaemon: newMinicapDaemon(rotationC, device),
+		minicapDaemon: newMinicapDaemon(nil, device),
 		jpgTcpSucker:  &jpgTcpSucker{Device: device},
 	}
 }

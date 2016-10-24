@@ -64,11 +64,35 @@ func (s *STFTouch) Stop() error {
 	})
 }
 
-func (s *STFTouch) Down(index, posX, posY int) {
+func (s *STFTouch) SetRotation(r int) {
+	s.rotation = r
+}
+
+func (s *STFTouch) width() float64 {
+	if s.rotation == 0 || s.rotation == 180 {
+		return float64(s.maxX)
+	} else {
+		return float64(s.maxY)
+	}
+}
+
+func (s *STFTouch) height() float64 {
+	if s.rotation == 0 || s.rotation == 180 {
+		return float64(s.maxY)
+	} else {
+		return float64(s.maxX)
+	}
+}
+
+func (s *STFTouch) Down(index int, xP, yP float64) {
+	posX := int(s.width() * xP)
+	posY := int(s.height() * yP)
 	s.cmdC <- fmt.Sprintf("d %v %v %v 50", index, posX, posY)
 }
 
-func (s *STFTouch) Move(index, posX, posY int) {
+func (s *STFTouch) Move(index int, xP, yP float64) {
+	posX := int(s.width() * xP)
+	posY := int(s.height() * yP)
 	s.cmdC <- fmt.Sprintf("m %v %v %v 50", index, posX, posY)
 }
 
