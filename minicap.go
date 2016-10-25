@@ -45,6 +45,7 @@ type minicapDaemon struct {
 	port                int
 	quitC               chan bool
 	rotationC           chan int
+	binaryPath          string
 
 	*adb.Device
 	errorMixin
@@ -98,7 +99,7 @@ func (m *minicapDaemon) prepareSafe() (mi minicapInfo, err error) {
 			return
 		}
 		m.killMinicap()
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		n += 1
 	}
 }
@@ -107,10 +108,16 @@ func (m *minicapDaemon) prepareSafe() (mi minicapInfo, err error) {
 // Check adb forward
 // For more information, see: https://github.com/openstf/minicap
 func (m *minicapDaemon) prepare() (mi minicapInfo, err error) {
-	if err = m.pushFiles(); err != nil {
-		return
+	slowCap := "/data/local/tmp/slow-minicap"
+	if m.isRemoteExists(slowCap) {
+		m.binaryPath = slowCap
+	} else {
+		m.binaryPath = "/data/local/tmp/minicap"
+		if err = m.pushFiles(); err != nil {
+			return
+		}
 	}
-	out, err := m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-i")
+	out, err := m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", m.binaryPath, "-i")
 	if err != nil {
 		err = errors.Wrap(err, "run minicap -i")
 		return
@@ -118,6 +125,24 @@ func (m *minicapDaemon) prepare() (mi minicapInfo, err error) {
 	err = json.Unmarshal([]byte(out), &mi)
 	return
 }
+
+func (m *minicapDaemon) isRemoteExists(path string) bool {
+	_, err := m.Stat(path)
+	return err == nil
+}
+
+// func (m *minicapDaemon) prepareSlow() (mi minicapInfo, err error) {
+// 	if err = m.pushFiles(); err != nil {
+// 		return
+// 	}
+// 	out, err := m.RunCommand("/data/local/tmp/slow-minicap", "-i")
+// 	if err != nil {
+// 		err = errors.Wrap(err, "run slow-minicap -i")
+// 		return
+// 	}
+// 	err = json.Unmarshal([]byte(out), &mi)
+// 	return
+// }
 
 func (m *minicapDaemon) pushFiles() error {
 	props, err := m.Properties()
@@ -139,11 +164,12 @@ func (m *minicapDaemon) pushFiles() error {
 		}
 		var urlStr string
 		var perms os.FileMode = 0644
+		baseUrl := "https://gohttp.nie.netease.com/openstf/vendor"
 		if filename == "minicap.so" {
-			urlStr = "https://github.com/openstf/stf/raw/master/vendor/minicap/shared/android-" + sdk + "/" + abi + "/minicap.so"
+			urlStr = baseUrl + "/minicap/shared/android-" + sdk + "/" + abi + "/minicap.so"
 		} else {
 			perms = 0755
-			urlStr = "https://github.com/openstf/stf/raw/master/vendor/minicap/bin/" + abi + "/minicap"
+			urlStr = baseUrl + "/minicap/bin/" + abi + "/minicap"
 		}
 		err := PushFileFromHTTP(m.Device, dst, perms, urlStr)
 		if err != nil {
@@ -180,7 +206,9 @@ func (m *minicapDaemon) SetRotation(r int) {
 func (m *minicapDaemon) runScreenCaptureWithRotate() {
 	m.killMinicap()
 	var err error
-	defer m.doneError(err)
+	defer func() {
+		m.doneError(errors.Wrap(err, "minicap"))
+	}()
 	errC := GoFunc(m.runScreenCapture)
 	var needRestart bool
 	for {
@@ -205,7 +233,7 @@ func (m *minicapDaemon) runScreenCaptureWithRotate() {
 
 func (m *minicapDaemon) runScreenCapture() (err error) {
 	param := fmt.Sprintf("%dx%d@%dx%d/%d", m.width, m.height, m.maxWidth, m.maxHeight, m.rotation)
-	c, err := m.OpenCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-P", param, "-S")
+	c, err := m.OpenCommand("LD_LIBRARY_PATH=/data/local/tmp", m.binaryPath, "-P", param, "-S")
 	if err != nil {
 		return
 	}
@@ -221,7 +249,8 @@ func (m *minicapDaemon) runScreenCapture() (err error) {
 		return
 	}
 	if !strings.Contains(string(line), "PID:") {
-		return errors.New("minicap starts failed, expect output: " + string(line))
+		err = errors.New("expect PID: <pid> actually: " + strconv.Quote(string(line)))
+		return errors.Wrap(err, "run minicap")
 	}
 	for {
 		_, _, err = buf.ReadLine()
@@ -229,11 +258,13 @@ func (m *minicapDaemon) runScreenCapture() (err error) {
 			break
 		}
 	}
-	return
+	return errors.New("minicap quit")
 }
 
 func (m *minicapDaemon) killMinicap() error {
-	return m.killProc("minicap", syscall.SIGKILL)
+	m.killProc("minicap", syscall.SIGKILL)
+	m.killProc("slow-minicap", syscall.SIGKILL)
+	return nil
 }
 
 // FIXME(ssx): maybe need to put into go-adb
@@ -265,10 +296,11 @@ func (m *minicapDaemon) killProc(psName string, sig syscall.Signal) (err error) 
 }
 
 type jpgTcpSucker struct {
-	port  int
-	conn  net.Conn
-	quitC chan bool
-	C     chan []byte
+	port        int
+	conn        net.Conn
+	quitC       chan bool
+	C           chan []byte
+	forwardSpec adb.ForwardSpec
 
 	errorMixin
 	safeMixin
@@ -302,7 +334,8 @@ func (s *jpgTcpSucker) Stop() error {
 
 // adb forward tcp:{port} localabstract:minicap
 func (s *jpgTcpSucker) prepareForward() (port int, err error) {
-	return s.ForwardToFreePort(adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
+	return s.ForwardToFreePort(s.forwardSpec) //adb.ForwardSpec{adb.FProtocolTcp, "2016"})
+	// return s.ForwardToFreePort(adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
 }
 
 type errorBinaryReader struct {
@@ -325,7 +358,10 @@ func (r *errorBinaryReader) ReadInto(datas ...interface{}) error {
 
 // TODO(ssx): Do not add retry for now
 func (s *jpgTcpSucker) keepReadFromTcp() (err error) {
-	defer s.doneError(err)
+	defer func() {
+		s.doneError(errors.Wrap(err, "readFromTcp"))
+	}()
+	leftRetry := 10
 	for {
 		select {
 		case err = <-GoFunc(s.readFromTcp):
@@ -333,10 +369,15 @@ func (s *jpgTcpSucker) keepReadFromTcp() (err error) {
 			return nil
 		}
 		select {
-		case <-time.After(1000 * time.Millisecond):
+		case <-time.After(500 * time.Millisecond):
 		case <-s.quitC:
 			return nil
 		}
+		if leftRetry <= 0 {
+			err = errors.New("jpgTcpSucker reach max retry(10)")
+			return
+		}
+		leftRetry -= 1
 	}
 }
 
@@ -396,9 +437,16 @@ func NewSTFCapturer(device *adb.Device) *STFCapturer {
 }
 
 func (s *STFCapturer) Start() error {
-	return wrapMultiError(
-		s.minicapDaemon.Start(),
-		s.jpgTcpSucker.Start())
+	err := s.minicapDaemon.Start()
+	if err != nil {
+		return err
+	}
+	if s.minicapDaemon.binaryPath == "/data/local/tmp/slow-minicap" {
+		s.jpgTcpSucker.forwardSpec = adb.ForwardSpec{adb.FProtocolTcp, "2016"}
+	} else {
+		s.jpgTcpSucker.forwardSpec = adb.ForwardSpec{adb.FProtocolAbstract, "minicap"}
+	}
+	return s.jpgTcpSucker.Start()
 }
 
 func (s *STFCapturer) Stop() error {
@@ -408,7 +456,13 @@ func (s *STFCapturer) Stop() error {
 }
 
 func (s *STFCapturer) Wait() error {
-	return wrapMultiError(
-		s.minicapDaemon.Wait(),
-		s.jpgTcpSucker.Wait())
+	select {
+	case err := <-GoFunc(s.minicapDaemon.Wait):
+		return err
+	case err := <-GoFunc(s.jpgTcpSucker.Wait):
+		return err
+	}
+	// return wrapMultiError(
+	// 	s.minicapDaemon.Wait(),
+	// 	s.jpgTcpSucker.Wait())
 }

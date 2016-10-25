@@ -84,15 +84,69 @@ func (s *STFTouch) height() float64 {
 	}
 }
 
+/**
+ * Rotation affects the screen as follows:
+ *
+ *                   0deg
+ *                 |------|
+ *                 | MENU |
+ *                 |------|
+ *            -->  |      |  --|
+ *            |    |      |    v
+ *                 |      |
+ *                 |      |
+ *                 |------|
+ *        |----|-|          |-|----|
+ *        |    |M|          | |    |
+ *        |    |E|          | |    |
+ *  90deg |    |N|          |U|    | 270deg
+ *        |    |U|          |N|    |
+ *        |    | |          |E|    |
+ *        |    | |          |M|    |
+ *        |----|-|          |-|----|
+ *                 |------|
+ *            ^    |      |    |
+ *            |--  |      |  <--
+ *                 |      |
+ *                 |      |
+ *                 |------|
+ *                 | UNEM |
+ *                 |------|
+ *                  180deg
+ *
+ * Which leads to the following mapping:
+ *
+ * |--------------|------|---------|---------|---------|
+ * |              | 0deg |  90deg  |  180deg |  270deg |
+ * |--------------|------|---------|---------|---------|
+ * | CSS rotate() | 0deg | -90deg  | -180deg |  90deg  |
+ * | bounding w   |  w   |    h    |    w    |    h    |
+ * | bounding h   |  h   |    w    |    h    |    w    |
+ * | pos x        |  x   |   h-y   |   w-x   |    y    |
+ * | pos y        |  y   |    x    |   h-y   |   h-x   |
+ * |--------------|------|---------|---------|---------|
+ */
+
+func (s *STFTouch) coords(xP, yP float64) (x, y int) {
+	switch s.rotation {
+	case 90:
+		xP, yP = 1-yP, xP
+	case 180:
+		xP, yP = 1-xP, 1-yP
+	case 270:
+		xP, yP = yP, 1-xP
+	}
+	w, h := float64(s.maxX), float64(s.maxY)
+	return int(w * xP), int(h * yP)
+}
+
 func (s *STFTouch) Down(index int, xP, yP float64) {
-	posX := int(s.width() * xP)
-	posY := int(s.height() * yP)
+	posX, posY := s.coords(xP, yP)
 	s.cmdC <- fmt.Sprintf("d %v %v %v 50", index, posX, posY)
 }
 
 func (s *STFTouch) Move(index int, xP, yP float64) {
-	posX := int(s.width() * xP)
-	posY := int(s.height() * yP)
+	posX, posY := s.coords(xP, yP)
 	s.cmdC <- fmt.Sprintf("m %v %v %v 50", index, posX, posY)
 }
 
