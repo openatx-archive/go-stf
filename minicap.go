@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -111,13 +112,14 @@ func (m *minicapDaemon) prepare() (mi minicapInfo, err error) {
 	slowCap := "/data/local/tmp/slow-minicap"
 	if m.isRemoteExists(slowCap) {
 		m.binaryPath = slowCap
+		log.Println("detect slow-minicap")
 	} else {
 		m.binaryPath = "/data/local/tmp/minicap"
 		if err = m.pushFiles(); err != nil {
 			return
 		}
 	}
-	out, err := m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", m.binaryPath, "-i")
+	out, err := m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", m.binaryPath, "-i", "2>/dev/null")
 	if err != nil {
 		err = errors.Wrap(err, "run minicap -i")
 		return
@@ -130,19 +132,6 @@ func (m *minicapDaemon) isRemoteExists(path string) bool {
 	_, err := m.Stat(path)
 	return err == nil
 }
-
-// func (m *minicapDaemon) prepareSlow() (mi minicapInfo, err error) {
-// 	if err = m.pushFiles(); err != nil {
-// 		return
-// 	}
-// 	out, err := m.RunCommand("/data/local/tmp/slow-minicap", "-i")
-// 	if err != nil {
-// 		err = errors.Wrap(err, "run slow-minicap -i")
-// 		return
-// 	}
-// 	err = json.Unmarshal([]byte(out), &mi)
-// 	return
-// }
 
 func (m *minicapDaemon) pushFiles() error {
 	props, err := m.Properties()
@@ -241,16 +230,23 @@ func (m *minicapDaemon) runScreenCapture() (err error) {
 	buf := bufio.NewReader(c)
 
 	// Example output below --.
+	// WARNING: ...
 	// PID: 9355
 	// INFO: Using projection 720x1280@720x1280/0
 	// INFO: (jni/minicap/JpgEncoder.cpp:64) Allocating 2766852 bytes for JPG encoder
-	line, _, err := buf.ReadLine()
-	if err != nil {
-		return
-	}
-	if !strings.Contains(string(line), "PID:") {
-		err = errors.New("expect PID: <pid> actually: " + strconv.Quote(string(line)))
-		return errors.Wrap(err, "run minicap")
+	for {
+		line, _, err := buf.ReadLine()
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(string(line), "WARNING") {
+			continue
+		}
+		if !strings.Contains(string(line), "PID:") {
+			err = errors.New("expect PID: <pid> actually: " + strconv.Quote(string(line)))
+			return errors.Wrap(err, "run minicap")
+		}
+		break
 	}
 	for {
 		_, _, err = buf.ReadLine()
@@ -313,7 +309,7 @@ func (s *jpgTcpSucker) Start() error {
 		var err error
 		s.C = make(chan []byte, 3)
 		s.quitC = make(chan bool, 1)
-		s.port, err = s.prepareForward()
+		s.port, err = s.ForwardToFreePort(s.forwardSpec)
 		if err != nil {
 			return err
 		}
@@ -330,12 +326,6 @@ func (s *jpgTcpSucker) Stop() error {
 		}
 		return s.Wait()
 	})
-}
-
-// adb forward tcp:{port} localabstract:minicap
-func (s *jpgTcpSucker) prepareForward() (port int, err error) {
-	return s.ForwardToFreePort(s.forwardSpec) //adb.ForwardSpec{adb.FProtocolTcp, "2016"})
-	// return s.ForwardToFreePort(adb.ForwardSpec{adb.FProtocolAbstract, "minicap"})
 }
 
 type errorBinaryReader struct {
