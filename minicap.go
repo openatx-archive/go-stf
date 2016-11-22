@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"io/ioutil"
+
+	"image/jpeg"
 
 	adb "github.com/openatx/go-adb"
 	"github.com/pkg/errors"
@@ -71,13 +74,9 @@ func (m *minicapDaemon) Start() error {
 			m.resetError()
 			m.quitC = make(chan bool, 1)
 			m.killMinicap()
-			minfo, err := m.prepareSafe()
-			if err != nil {
+			if err := m.prepareSafe(); err != nil {
 				return errors.Wrap(err, "prepare minicap")
 			}
-			m.width = minfo.Width
-			m.height = minfo.Height
-			m.rotation = minfo.Rotation
 			go m.runScreenCaptureWithRotate() // TODO
 			return nil
 		})
@@ -92,39 +91,95 @@ func (m *minicapDaemon) Stop() error {
 }
 
 // minicap may say resource is busy ..
-func (m *minicapDaemon) prepareSafe() (mi minicapInfo, err error) {
+func (m *minicapDaemon) prepareSafe() (err error) {
 	n := 0
 	for {
-		mi, err = m.prepare()
+		err = m.prepare()
 		if err == nil || n >= 3 {
 			return
 		}
 		m.killMinicap()
 		time.Sleep(100 * time.Millisecond)
-		n += 1
+		n++
 	}
 }
 
 // Check whether minicap is supported on the device
 // Check adb forward
 // For more information, see: https://github.com/openstf/minicap
-func (m *minicapDaemon) prepare() (mi minicapInfo, err error) {
-	slowCap := "/data/local/tmp/slow-minicap"
-	if m.isRemoteExists(slowCap) {
-		m.binaryPath = slowCap
-		log.Println("detect slow-minicap")
-	} else {
-		m.binaryPath = "/data/local/tmp/minicap"
-		if err = m.pushFiles(); err != nil {
-			return
-		}
-	}
-	out, err := m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", m.binaryPath, "-i", "2>/dev/null")
-	if err != nil {
-		err = errors.Wrap(err, "run minicap -i")
+func (m *minicapDaemon) prepare() (err error) {
+	if err = m.pushFiles(); err != nil {
 		return
 	}
+	switch {
+	case m.checkMinicap() == nil:
+		m.binaryPath = "/data/local/tmp/minicap"
+	case m.checkSlowMinicap() == nil:
+		m.binaryPath = "/data/local/tmp/slow-minicap"
+	default:
+		err = errors.New("no suitable screen capture method found")
+		return
+	}
+	return
+}
+
+// first check the minicap -i output
+// then update device basic info
+// at last take an screenshot, it may take some time, but it is worth of time
+func (m *minicapDaemon) checkMinicap() error {
+	var mi minicapInfo
+	out, err := m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-i", "2>/dev/null")
+	if err != nil {
+		return errors.Wrap(err, "run minicap -i")
+	}
 	err = json.Unmarshal([]byte(out), &mi)
+	if err != nil {
+		return err
+	}
+	m.width = mi.Width
+	m.height = mi.Height
+	m.rotation = mi.Rotation
+	data, err := m.takeScreenshot()
+	if err != nil {
+		return errors.Wrap(err, "check minicap")
+	}
+	_, err = jpeg.Decode(bytes.NewBuffer(data))
+	if err != nil {
+		return errors.Wrap(err, "check minicap")
+	}
+	return nil
+}
+
+func (m *minicapDaemon) checkSlowMinicap() error {
+	var mi minicapInfo
+	out, err := m.RunCommand("/data/local/tmp/slow-minicap", "-i", "2>/dev/null")
+	if err != nil {
+		return errors.Wrap(err, "run slow-minicap -i")
+	}
+	err = json.Unmarshal([]byte(out), &mi)
+	if err != nil {
+		return err
+	}
+	m.width = mi.Width
+	m.height = mi.Height
+	m.rotation = mi.Rotation
+	return nil
+}
+
+// takeScreenshot output jpeg binary
+func (m *minicapDaemon) takeScreenshot() (data []byte, err error) {
+	tmpFile := "/data/local/tmp/minicap_check.jpg"
+	_, err = m.RunCommand("LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-s", "-P", fmt.Sprintf(
+		"%dx%d@%dx%d/0", m.width, m.height, m.width, m.height), ">"+tmpFile)
+	if err != nil {
+		return
+	}
+	defer m.RunCommand("rm", tmpFile)
+	rd, err := m.OpenRead(tmpFile)
+	if err != nil {
+		return
+	}
+	data, err = ioutil.ReadAll(rd)
 	return
 }
 
@@ -148,7 +203,7 @@ func (m *minicapDaemon) pushFiles() error {
 	}
 	for _, filename := range []string{"minicap.so", "minicap"} {
 		dst := "/data/local/tmp/" + filename
-		if AdbFileExists(m.Device, dst) {
+		if m.isRemoteExists(dst) {
 			continue
 		}
 		var urlStr string
@@ -164,6 +219,10 @@ func (m *minicapDaemon) pushFiles() error {
 		if err != nil {
 			return err
 		}
+	}
+	err = PushFileFromHTTP(m.Device, "/data/local/tmp/slow-minicap", 0755, "https://gohttp.nie.netease.com/yosemite/slow-minicap/"+abi+"/slow-minicap")
+	if err != nil {
+		return errors.Wrap(err, "push files")
 	}
 	return nil
 }
